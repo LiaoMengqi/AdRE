@@ -1,5 +1,6 @@
 import glob
 import os
+import random
 
 import torch
 from datasets import load_dataset
@@ -8,7 +9,7 @@ from transformers import (
     DataCollatorForSeq2Seq,
     TrainingArguments, Trainer, AutoConfig, )
 
-from .models.adre_qwen2 import AdreQwen2ForCausalLM
+from adre.models.adre_qwen2 import AdreQwen2ForCausalLM
 
 
 # 将预处理函数移到全局作用域
@@ -46,21 +47,21 @@ def preprocess_function(examples, tokenizer, num_experts):
 
     labels = []
     input_ids = []
-    output_mask = []
+    # output_mask = []
     gate_values = []
     for i in range(batch_size):
         label = [-100] * (input_lengths[i]) + tokenized_outputs["input_ids"][i]
         labels.append(label)
         input_ids.append(tokenized_inputs["input_ids"][i] + tokenized_outputs["input_ids"][i])
-        output_mask.append([0] * (input_lengths[i]) + [1] * output_mask[i])
+        # output_mask.append([0] * (input_lengths[i]) + [1] * output_lengths[i])
         gate_value = [0] * num_experts
-        gate_value[int(examples['rank'][i] * num_experts - 1e-5)] = 1
+        gate_value[max(0, int(examples['rank'][i] * num_experts - 1e-5))] = 1
         gate_values.append(gate_value)
     model_inputs = {'input_ids': input_ids,
                     'labels': labels,
                     'input_len': input_lengths,
                     'target_length': output_lengths,
-                    'output_mask': output_mask,
+                    # 'output_mask': output_mask,
                     'gate_values': gate_values}
     return model_inputs
 
@@ -87,6 +88,7 @@ class AdreDataCollator(DataCollatorForSeq2Seq):
         batch = super().__call__(features, return_tensors=None)
         max_length = max(len(feature["input_ids"]) for feature in features)
         padded_position_ids = []
+        output_mask = []
         for feature in features:
             orig_position_ids = list(range(feature["input_len"] + feature["target_length"]))
 
@@ -96,8 +98,10 @@ class AdreDataCollator(DataCollatorForSeq2Seq):
             else:
                 padded_ids = [0] * padding_length + orig_position_ids
             padded_position_ids.append(padded_ids)
+            output_mask.append([0] * (max_length - feature['target_length']) + [1] * feature['target_length'])
 
         batch["position_ids"] = torch.tensor(padded_position_ids, dtype=torch.long, device=batch["input_ids"].device)
+        batch["output_mask"] = torch.tensor(output_mask, dtype=torch.long, device=batch["input_ids"].device)
         return batch
 
 
@@ -106,23 +110,32 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     # general args
-    parser.add_argument("--model", type=str, default="./model/", help="model name or path")
-    parser.add_argument("--dataset", type=str, default="./data/extend_data_18k/", help="data path")
-    parser.add_argument("--output_dir", type=str, default="./output/", help="output path")
-    parser.add_argument("--logdir", type=str, default="./logs/", help="log directory")
+    parser.add_argument("--model", type=str,
+                        default="/data/MaoXiaowei/models/model/deepseek-ai/DeepSeek-R1-Distill-Qwen-1___5B/",
+                        help="model name or path")
+    parser.add_argument("--dataset", type=str, default="/data/MaoXiaowei/models/adre/dataset/mix_filtered_45k/",
+                        help="data path")
+    parser.add_argument("--output_dir", type=str, default="/data/MaoXiaowei/models/adre/output/adre_sft/",
+                        help="output path")
+    parser.add_argument("--logdir", type=str, default="/data/MaoXiaowei/models/adre/logs/adre_sft/",
+                        help="log directory")
     # training args
     parser.add_argument("--epochs", type=int, default=1, help="epochs")
-    parser.add_argument("--batch_size", type=int, default=1, help="batch size")
+    parser.add_argument("--micro_batch_size", type=int, default=1, help="batch size")
+    parser.add_argument("--eval_batch_size", type=int, default=1, help="batch size")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-5, help="learning rate")
+    parser.add_argument("--save_steps", type=int, default=200)
+    parser.add_argument("--eval_steps", type=int, default=200)
     # model args
-    parser.add_argument("--num_experts", type=int, default=8)
-    parser.add_argument("--lora_rank", type=int, default=8)
-    parser.add_argument("--lora_alpha", type=int, default=8)
+    parser.add_argument("--num_experts", type=int, default=4)
+    parser.add_argument("--lora_rank", type=int, default=4)
+    parser.add_argument("--lora_alpha", type=int, default=4)
     parser.add_argument("--expert_top_k", type=int, default=1)
-    parser.add_argument("--adapter_layers", type=int, default=4)
-    parser.add_argument("--num_embeddings", type=int, default=4)
-    parser.add_argument("--use_hydra_lora", action='store_true', default=False)
-    parser.add_argument("--use_multi_lora", action='store_true', default=False)
+    parser.add_argument("--adapter_layers", type=int, default=1)
+    parser.add_argument("--num_embeddings", type=int, default=1)
+    parser.add_argument("--use_hydra_lora", action='store_true', default=True)
+    parser.add_argument("--use_multi_lora", action='store_true', default=True)
 
     args = parser.parse_args()
 
@@ -147,8 +160,17 @@ if __name__ == "__main__":
     # model
     model = AdreQwen2ForCausalLM.from_pretrained(
         args.model,
-        torch_dtype=torch.bfloat16
+        torch_dtype=torch.bfloat16,
+        config=config,
     )
+
+    # frozen model parameters
+    trainable_para_name_list = ["adapter", "router_proj", "adre_embedding"]
+    for name, param in model.named_parameters():
+        if not any(trainable_name in name for trainable_name in trainable_para_name_list):
+            param.requires_grad = False
+        else:
+            param.requires_grad = True
 
     dataset = load_and_process_data(args.dataset, tokenizer, config.num_experts)
 
@@ -163,35 +185,40 @@ if __name__ == "__main__":
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         # deepspeed="./train_config/ds_config.json",
-        num_train_epochs=1,
-        per_device_train_batch_size=1,
-        per_device_eval_batch_size=2,
-        gradient_accumulation_steps=16,
-        learning_rate=2e-5,
+        num_train_epochs=args.epochs,
+        per_device_train_batch_size=args.micro_batch_size,
+        per_device_eval_batch_size=args.eval_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        learning_rate=args.lr,
         weight_decay=0.01,
         warmup_ratio=0.1,
         logging_steps=10,
         logging_dir=args.logdir,
-        save_steps=200,
-        evaluation_strategy="steps",
-        eval_steps=200,
+        save_steps=args.save_steps,
+        eval_strategy="steps",
+        eval_steps=args.eval_steps,
         save_total_limit=1,
-        load_best_model_at_end=True,  # 加载最佳模型
-        metric_for_best_model="eval_loss",  # 以验证集损失为指标
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
         greater_is_better=False,
         report_to="tensorboard",
         fp16=False,
-        bf16=True,  # 如果你的GPU支持bf16，可以设为True
-        gradient_checkpointing=True,
+        bf16=True,
+        gradient_checkpointing=False,  # AdRE don't support gradient checkpointing
         remove_unused_columns=False,
-        lr_scheduler_type="cosine",  # 使用余弦学习率衰减
-        lr_scheduler_kwargs={"num_cycles": 0.5},  # 半个余弦周期
+        lr_scheduler_type="cosine",
+        lr_scheduler_kwargs={"num_cycles": 0.5},
+        optim="adamw_torch",
     )
 
-    train_size = len(dataset) - 100
+    indices = list(range(len(dataset)))
+
+    random.shuffle(indices)
     eval_size = min(100, len(dataset))
-    train_dataset = dataset.select(range(train_size))
-    eval_dataset = dataset.select(range(train_size, len(dataset)))
+    train_size = len(dataset) - eval_size
+
+    train_dataset = dataset.select(indices[:train_size])
+    eval_dataset = dataset.select(indices[train_size:])
 
     trainer = Trainer(
         model=model,
@@ -203,6 +230,7 @@ if __name__ == "__main__":
     )
 
     trainer.train()
-    model.save_pretrained(args.output + '/final_checkpoint/')
-    model.config.save_pretrained(args.output + '/final_checkpoint/')
-    tokenizer.save_pretrained(args.output + '/final_checkpoint/')
+
+    model.save_pretrained(args.output + 'final_checkpoint/')
+    model.config.save_pretrained(args.output + 'final_checkpoint/')
+    tokenizer.save_pretrained(args.output + 'final_checkpoint/')

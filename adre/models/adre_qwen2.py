@@ -42,7 +42,7 @@ class AdreQwen2MLP(nn.Module):
         param gate_values: (bsz, num_experts)
         return: (bsz, num_experts)
         """
-        _, indices = torch.topk(gate_values, self.expert_top_k, dim=-1)
+        _, indices = torch.topk(gate_values.detach(), self.expert_top_k, dim=-1)
         binary_gates = torch.zeros_like(gate_values, device=gate_values.device, dtype=gate_values.dtype)
         binary_gates.scatter_(1, indices, 1.0)
         return binary_gates
@@ -83,7 +83,7 @@ class AdreQwen2Attention(nn.Module):
         if config.use_multi_lora:
             # adre attention enbeddings
             self.num_embeddings = config.num_embeddings
-            self.embedding = nn.Parameter(
+            self.adre_embedding = nn.Parameter(
                 torch.randn(1, config.num_attention_heads, config.num_embeddings, self.head_dim))
             # adre router
             self.num_experts = config.num_experts
@@ -143,7 +143,7 @@ class AdreQwen2Attention(nn.Module):
             if input_shape[-1] > 1:
                 # prefill
                 # extend query_states (bsz, num_attention_heads, seq_len, head_dim) to (bsz, num_attention_heads, seq_len + num_embeddings, head_dim)
-                embeddings = self.embedding.expand(input_shape[0], -1, -1, -1)
+                embeddings = self.adre_embedding.expand(input_shape[0], -1, -1, -1)
                 query_states = torch.cat([query_states, embeddings], dim=-2)
                 # extend attention_mask (bsz, 1, seq_len, seq_len) to (bsz, 1, seq_len + num_of_embeddings, seq_len)
                 if attention_mask is not None:
