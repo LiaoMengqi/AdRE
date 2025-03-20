@@ -1,5 +1,5 @@
 from typing import Optional, Tuple, Callable, Union, List
-
+from dataclasses import dataclass
 import torch
 from torch import nn
 from transformers import Qwen2Config, GenerationMixin
@@ -9,7 +9,7 @@ from transformers.models.qwen2.modeling_qwen2 import (
     ACT2FN, apply_rotary_pos_emb, eager_attention_forward, Qwen2PreTrainedModel, Qwen2DecoderLayer,
     Qwen2RotaryEmbedding, QWEN2_INPUTS_DOCSTRING, BaseModelOutputWithPast, DynamicCache, Qwen2Model, Qwen2ForCausalLM,
     deprecate_kwarg, KwargsForCausalLM, CausalLMOutputWithPast, replace_return_docstrings, AttentionMaskConverter,
-    StaticCache, SlidingWindowCache
+    StaticCache, SlidingWindowCache, BaseModelOutputWithPast
 )
 from transformers.utils import add_start_docstrings_to_model_forward
 
@@ -38,13 +38,15 @@ class AdreQwen2MLP(nn.Module):
 
     def get_top_k_gate_values(self, gate_values: torch.Tensor):
         """
-        set the top k values 1, others 0
         param gate_values: (bsz, num_experts)
         return: (bsz, num_experts)
         """
-        _, indices = torch.topk(gate_values.detach(), self.expert_top_k, dim=-1)
+        gate_values = torch.softmax(gate_values, dim=-1)
+        values, indices = torch.topk(gate_values, self.expert_top_k, dim=-1)
         binary_gates = torch.zeros_like(gate_values, device=gate_values.device, dtype=gate_values.dtype)
-        binary_gates.scatter_(1, indices, 1.0)
+        binary_gates.scatter_(1, indices, values)
+        #  normalize, the sum of binary_gates is 1
+        binary_gates = binary_gates / (binary_gates.detach().sum(dim=-1, keepdim=True) + 1e-6)
         return binary_gates
 
     def forward(self, x,
@@ -280,6 +282,10 @@ class AdreQwen2DecoderLayer(nn.Module):
 
         return outputs
 
+@dataclass
+class AdreModelOutputWithPast(BaseModelOutputWithPast):
+    ref_hidden_states: Optional[torch.FloatTensor] = None
+
 
 class AdreQwen2Model(Qwen2PreTrainedModel):
     def __init__(self, config: Qwen2Config):
@@ -406,8 +412,8 @@ class AdreQwen2Model(Qwen2PreTrainedModel):
             return_dict: Optional[bool] = None,
             cache_position: Optional[torch.LongTensor] = None,
             gate_values: Optional[torch.Tensor] = None,
-            use_adapter: bool = True,
             output_mask: Optional[torch.Tensor] = None,
+            caculate_ref: bool = False,
             **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -454,24 +460,34 @@ class AdreQwen2Model(Qwen2PreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
 
+
+        ref_hidden_states = None
         for layer_index, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            if self.gradient_checkpointing and self.training:
-                if layer_index < self.start_idx:
-                    layer_outputs = self._gradient_checkpointing_func(
-                        decoder_layer.__call__,
+            if layer_index < self.start_idx:
+                with torch.no_grad():
+                    layer_outputs = decoder_layer(
                         hidden_states,
-                        causal_mask,
-                        position_ids,
-                        past_key_values,
-                        output_attentions,
-                        use_cache,
-                        cache_position,
-                        position_embeddings,
+                        attention_mask=causal_mask,
+                        position_ids=position_ids,
+                        past_key_value=past_key_values,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        cache_position=cache_position,
+                        position_embeddings=position_embeddings,
+                        **flash_attn_kwargs,
                     )
-                else:
+                
+            else:
+                if layer_index == self.start_idx and caculate_ref:
+                    ref_hidden_states = hidden_states
+
+                if not gate_values is None:
+                    gate_values=gate_values.to(hidden_states.dtype)
+
+                if self.gradient_checkpointing and self.training and layer_index > self.start_idx:
                     layer_outputs = self._gradient_checkpointing_func(
                         decoder_layer.__call__,
                         hidden_states,
@@ -483,21 +499,8 @@ class AdreQwen2Model(Qwen2PreTrainedModel):
                         cache_position,
                         position_embeddings,
                         output_mask,
-                        use_adapter,
+                        True,
                         gate_values
-                    )
-            else:
-                if layer_index < self.start_idx:
-                    layer_outputs = decoder_layer(
-                        hidden_states,
-                        attention_mask=causal_mask,
-                        position_ids=position_ids,
-                        past_key_value=past_key_values,
-                        output_attentions=output_attentions,
-                        use_cache=use_cache,
-                        cache_position=cache_position,
-                        position_embeddings=position_embeddings,
-                        **flash_attn_kwargs,
                     )
                 else:
                     layer_outputs = decoder_layer(
@@ -510,31 +513,56 @@ class AdreQwen2Model(Qwen2PreTrainedModel):
                         cache_position=cache_position,
                         position_embeddings=position_embeddings,
                         output_mask=output_mask,
-                        use_adapter=use_adapter,
+                        use_adapter=True,
                         gate_values=gate_values,
                         **flash_attn_kwargs,
-
                     )
 
-            hidden_states = layer_outputs[0]
+                if caculate_ref:
+                    with torch.no_grad():
+                        ref_layer_outputs = decoder_layer(
+                            ref_hidden_states,
+                            attention_mask=causal_mask,
+                            position_ids=position_ids,
+                            past_key_value=past_key_values,
+                            output_attentions=output_attentions,
+                            use_cache=use_cache,
+                            cache_position=cache_position,
+                            position_embeddings=position_embeddings,
+                            output_mask=output_mask,
+                            use_adapter=False,
+                            gate_values=gate_values,
+                            **flash_attn_kwargs,
+                        )
+                        ref_hidden_states = ref_layer_outputs[0]
 
+            hidden_states = layer_outputs[0]
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
         hidden_states = self.norm(hidden_states)
 
+        if ref_hidden_states is not None:
+            with torch.no_grad():
+                ref_hidden_states = self.norm(ref_hidden_states)
+
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        output = BaseModelOutputWithPast(
+        output = AdreModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values if use_cache else None,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
+            ref_hidden_states=ref_hidden_states
         )
         return output if return_dict else output.to_tuple()
 
+
+@dataclass
+class AdreCausalLMOutputWithPast(CausalLMOutputWithPast):
+    ref_logits: Optional[torch.FloatTensor] = None
 
 class AdreQwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
@@ -591,7 +619,7 @@ class AdreQwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             attention_mask: Optional[torch.Tensor] = None,
             position_ids: Optional[torch.LongTensor] = None,
             gate_values: Optional[torch.Tensor] = None,
-            use_adapter: bool = True,
+            caculate_ref: bool = False,
             output_mask: Optional[torch.Tensor] = None,
             past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
             inputs_embeds: Optional[torch.FloatTensor] = None,
@@ -648,7 +676,7 @@ class AdreQwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             attention_mask=attention_mask,
             position_ids=position_ids,
             gate_values=gate_values,
-            use_adapter=use_adapter,
+            caculate_ref=caculate_ref,
             output_mask=output_mask,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
@@ -665,18 +693,29 @@ class AdreQwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, slice_indices, :])
 
+        if caculate_ref:
+            ref_hidden_states = outputs[-1]
+            with torch.no_grad():
+                ref_logits = self.lm_head(ref_hidden_states[:, slice_indices, :])
+        else:
+            ref_logits = None
+
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
 
         if not return_dict:
-            output = (logits,) + outputs[1:]
+            if ref_logits is not None:
+                output = (logits,) + outputs[1: -1] + (ref_logits,)
+            else:
+                output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
-        return CausalLMOutputWithPast(
+        return AdreCausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            ref_logits=ref_logits
         )
