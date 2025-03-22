@@ -1,6 +1,10 @@
 import glob
 import os
 import random
+import os
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import torch
 from datasets import load_dataset
@@ -9,16 +13,17 @@ from transformers import (
     DataCollatorForSeq2Seq,
     TrainingArguments, Trainer, AutoConfig, )
 
-from adre.models.adre_qwen2 import AdreQwen2ForCausalLM
+
+from .models.adre_qwen2 import AdreQwen2ForCausalLM
 
 
-# 将预处理函数移到全局作用域
 def preprocess_function(examples, tokenizer, num_experts):
     batch_size = len(examples["prompt"])
 
     input_texts = tokenizer.apply_chat_template(examples['prompt'], tokenize=False,
                                                 add_generation_prompt=True)
-
+    input_texts = [text if text.endswith("<think>\n") else text + "<think>\n" 
+                   for text in input_texts]
     outputs = []
     for i in range(batch_size):
         outputs.append(examples['deepseek_reasoning'][i] + '\n</think>\n\n' + examples['deepseek_solution'][
@@ -47,31 +52,31 @@ def preprocess_function(examples, tokenizer, num_experts):
 
     labels = []
     input_ids = []
-    # output_mask = []
+    attention_mask = []
     gate_values = []
     for i in range(batch_size):
         label = [-100] * (input_lengths[i]) + tokenized_outputs["input_ids"][i]
         labels.append(label)
         input_ids.append(tokenized_inputs["input_ids"][i] + tokenized_outputs["input_ids"][i])
-        # output_mask.append([0] * (input_lengths[i]) + [1] * output_lengths[i])
         gate_value = [0] * num_experts
         gate_value[max(0, int(examples['rank'][i] * num_experts - 1e-5))] = 1
         gate_values.append(gate_value)
+        attention_mask.append([1] * (input_lengths[i] + output_lengths[i]))
     model_inputs = {'input_ids': input_ids,
                     'labels': labels,
                     'input_len': input_lengths,
                     'target_length': output_lengths,
-                    # 'output_mask': output_mask,
-                    'gate_values': gate_values}
+                    'gate_values': gate_values,
+                    'attention_mask': attention_mask}
     return model_inputs
 
 
 # 3. 准备数据集
 def load_and_process_data(data_path, tokenizer, base_length):
-    file_paths = glob.glob(f"{data_path}/*.arrow")
+    file_paths = glob.glob(f"{data_path}/*.parquet")
 
     # 加载并合并所有文件的数据集
-    dataset = load_dataset("arrow", data_files=file_paths, split="train")
+    dataset = load_dataset("parquet", data_files=file_paths, split="train")
 
     processed_dataset = dataset.map(
         lambda examples: preprocess_function(examples, tokenizer, base_length),
@@ -101,43 +106,50 @@ class AdreDataCollator(DataCollatorForSeq2Seq):
             output_mask.append([0] * (max_length - feature['target_length']) + [1] * feature['target_length'])
 
         batch["position_ids"] = torch.tensor(padded_position_ids, dtype=torch.long, device=batch["input_ids"].device)
+        # mask the output for gate values caculation
         batch["output_mask"] = torch.tensor(output_mask, dtype=torch.long, device=batch["input_ids"].device)
         return batch
 
 
 if __name__ == "__main__":
     import argparse
+    from .utils.utils import set_seed
+
 
     parser = argparse.ArgumentParser()
     # general args
     parser.add_argument("--model", type=str,
-                        default="/data/MaoXiaowei/models/model/deepseek-ai/DeepSeek-R1-Distill-Qwen-1___5B/",
+                        default="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-mtai/users/liaomengqi/model/huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
                         help="model name or path")
-    parser.add_argument("--dataset", type=str, default="/data/MaoXiaowei/models/adre/dataset/mix_filtered_45k/",
+    parser.add_argument("--dataset", type=str, default="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-mtai/users/liaomengqi/data/datasets",
                         help="data path")
-    parser.add_argument("--output_dir", type=str, default="/data/MaoXiaowei/models/adre/output/adre_sft/",
+    parser.add_argument("--output_dir", type=str, default="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-mtai/users/liaomengqi/model/adre_test",
                         help="output path")
-    parser.add_argument("--logdir", type=str, default="/data/MaoXiaowei/models/adre/logs/adre_sft/",
+    parser.add_argument("--logdir", type=str, default="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-mtai/users/liaomengqi/model/adre_test/tensorboard",
                         help="log directory")
     # training args
     parser.add_argument("--epochs", type=int, default=1, help="epochs")
-    parser.add_argument("--micro_batch_size", type=int, default=1, help="batch size")
-    parser.add_argument("--eval_batch_size", type=int, default=1, help="batch size")
+    parser.add_argument("--micro_batch_size_per_gpu", type=int, default=1, help="batch size")
+    parser.add_argument("--eval_batch_size_per_gpu", type=int, default=1, help="batch size")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-5, help="learning rate")
     parser.add_argument("--save_steps", type=int, default=200)
     parser.add_argument("--eval_steps", type=int, default=200)
+    parser.add_argument("--gradient_checkpointing", action='store_true', default=False)
     # model args
-    parser.add_argument("--num_experts", type=int, default=4)
-    parser.add_argument("--lora_rank", type=int, default=4)
-    parser.add_argument("--lora_alpha", type=int, default=4)
+    parser.add_argument("--num_experts", type=int, default=8)
+    parser.add_argument("--lora_rank", type=int, default=8)
+    parser.add_argument("--lora_alpha", type=int, default=16)
     parser.add_argument("--expert_top_k", type=int, default=1)
-    parser.add_argument("--adapter_layers", type=int, default=1)
-    parser.add_argument("--num_embeddings", type=int, default=1)
+    parser.add_argument("--adapter_layers", type=int, default=8)
+    parser.add_argument("--num_embeddings", type=int, default=8)
     parser.add_argument("--use_hydra_lora", action='store_true', default=True)
     parser.add_argument("--use_multi_lora", action='store_true', default=True)
+    parser.add_argument("--lora_b_lr_eta", type=float, default=16.0)
+    parser.add_argument("--seed", type=int, default=0)
 
     args = parser.parse_args()
+    set_seed(args.seed)
 
     # mkdir
     os.makedirs(args.logdir, exist_ok=True)
@@ -157,6 +169,7 @@ if __name__ == "__main__":
     config.expert_top_k = args.expert_top_k
     config.adapter_layers = args.adapter_layers
     config.num_embeddings = args.num_embeddings
+    
     # model
     model = AdreQwen2ForCausalLM.from_pretrained(
         args.model,
@@ -171,6 +184,20 @@ if __name__ == "__main__":
             param.requires_grad = False
         else:
             param.requires_grad = True
+    
+    # lora+ setup, set higher learning rate for lora_b parameters
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in model.named_parameters() 
+                      if  "lora_b" not in n and p.requires_grad],
+            "lr": args.lr,
+        },
+        {
+            "params": [p for n, p in model.named_parameters() 
+                      if "lora_b" in n and p.requires_grad],
+            "lr": args.lr * args.lora_b_lr_eta,  
+        }
+    ]
 
     dataset = load_and_process_data(args.dataset, tokenizer, config.num_experts)
 
@@ -184,10 +211,9 @@ if __name__ == "__main__":
     # 5. 训练参数设置
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        # deepspeed="./train_config/ds_config.json",
         num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.micro_batch_size,
-        per_device_eval_batch_size=args.eval_batch_size,
+        per_device_train_batch_size=args.micro_batch_size_per_gpu,
+        per_device_eval_batch_size=args.eval_batch_size_per_gpu,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.lr,
         weight_decay=0.01,
@@ -204,7 +230,7 @@ if __name__ == "__main__":
         report_to="tensorboard",
         fp16=False,
         bf16=True,
-        gradient_checkpointing=False,  # AdRE don't support gradient checkpointing
+        gradient_checkpointing=args.gradient_checkpointing, 
         remove_unused_columns=False,
         lr_scheduler_type="cosine",
         lr_scheduler_kwargs={"num_cycles": 0.5},
@@ -220,6 +246,12 @@ if __name__ == "__main__":
     train_dataset = dataset.select(indices[:train_size])
     eval_dataset = dataset.select(indices[train_size:])
 
+    optimizer = torch.optim.AdamW(
+        optimizer_grouped_parameters,
+        betas=(0.9, 0.999),     
+        weight_decay=0.01,     
+    )
+
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -227,10 +259,7 @@ if __name__ == "__main__":
         eval_dataset=eval_dataset,
         tokenizer=tokenizer,
         data_collator=data_collator,
+        optimizers=(optimizer, None),
     )
 
     trainer.train()
-
-    model.save_pretrained(args.output + 'final_checkpoint/')
-    model.config.save_pretrained(args.output + 'final_checkpoint/')
-    tokenizer.save_pretrained(args.output + 'final_checkpoint/')
