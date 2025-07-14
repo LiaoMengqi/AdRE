@@ -2,7 +2,6 @@ export NCCL_DEBUG=INFO
 export CRYPTOGRAPHY_OPENSSL_NO_LEGACY=1
 
 BASE_PATH="./"
-CONDA_PATH="./conda/verl_base/bin/activate"
 MODEL_PATH="$BASE_PATH/model/r1_15b_adre_sft/checkpoint-250"
 TRAIN_DATA_PATH="$BASE_PATH/data/rl_math/rl_train_data.parquet"
 EVAL_DATA_PATH="$BASE_PATH/data/rl_math/rl_eval_data.parquet"
