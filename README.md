@@ -56,4 +56,4 @@ AdRE is a LoRA Adapter reinforcement learning (RL) framework designed for large 
 
 ## Acknowledgements
 
-This project is inspired by and references the excellent work of [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF) and [VeRL](https://github.com/PKU-Alignment/VeRA). Sincere thanks to their open-source contributions to the community.
+This project is inspired by and references the excellent work of [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF) and [VeRL](https://github.com/volcengine/verl). Sincere thanks to their open-source contributions to the community.
