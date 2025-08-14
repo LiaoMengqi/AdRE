@@ -45,9 +45,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     # general
-    parser.add_argument("--model", type=str, default="./checkpoint/")
-    parser.add_argument("--dataset", type=str, default="./dataset/train_cases.json")
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--dataset", type=str, required=True)
+    parser.add_argument("--seed", type=int, default=42)
 
     # training
     parser.add_argument("--lr", type=float, default=1e-5)
@@ -76,8 +76,19 @@ if __name__ == "__main__":
         "--micro_batch_size_per_gpu",
         type=int,
         default=5,
-        help="batch size to update policy",
+        help="batch size for each forward pass and backward pass",
     )
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+
+    parser.add_argument("--use_kl_loss", action="store_true", default=False)
+    parser.add_argument("--use_kl_estimator_k3", action="store_true", default=False)
+    parser.add_argument("--init_kl_coef", type=float, default=1e-4)
+    parser.add_argument("--reward_std", action="store_true", default=False)
+    parser.add_argument("--entropy_coeff", type=float, default=1e-3)
+    parser.add_argument("--token_level_loss", action="store_true", default=False)
+    parser.add_argument("--bf16", action="store_true", default=False)
+    parser.add_argument("--log_prob_batch_size", type=int, default=4)
+
     parser.add_argument("--epsilon", type=float, default=0.2)
     parser.add_argument("--beta", type=float, default=5)
 
@@ -85,9 +96,14 @@ if __name__ == "__main__":
     parser.add_argument("--save_step", type=int, default=20)
     parser.add_argument("--save_dir", type=str, default="./checkpoint/")
 
+    # adapter config
+    parser.add_argument("--use_adapter", action="store_true", default=False)
+    parser.add_argument("--adapter_layers", type=int, default=1)
+    parser.add_argument("--adapter_rank", type=int, default=1)
+
     # rollout parameters
     parser.add_argument(
-        "--rollout_n", type=int, default=10, help="number of samples for each prompt"
+        "--rollout_n", type=int, default=8, help="number of samples for each prompt"
     )
     parser.add_argument("--max_len", type=int, default=8196)
     parser.add_argument("--top_p", type=float, default=0.8)
@@ -95,7 +111,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--use_temperature_scheduler", action="store_true", default=False
     )
-    parser.add_argument("--final_temperature", type=float, default=0.8)
     
 
     args = parser.parse_args()
