@@ -19,6 +19,13 @@ from .utils.utils import set_seed
 def main(args):
     set_seed(args.seed)
     config = AutoConfig.from_pretrained(args.model)
+    if args.use_adapter:
+        config.adapter_config={
+            "adapter_layers": args.adapter_layers,
+            "rank": args.adapter_rank,
+            "use_multi_lora": args.use_multi_lora,
+            "alpha": args.alpha,
+        }
 
     if config.model_type == "llama":
         model = AdreLLaMAForCausalLM.from_pretrained(args.model)
