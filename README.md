@@ -1,7 +1,9 @@
 # AdRE: Adapter Reinforcement Learning Framework
 
 ## News 🔥
+[2025/08/14] Urgent‼️ We found that the code is incomplete and many of them are early versions. I will complete these codes later.
 [2025/07/14] Make the repository open source！
+
 ## Introduction
 
 AdRE is a LoRA Adapter reinforcement learning (RL) framework designed for large language models (LLMs) and supports multi-expert (Multi-LoRA-Expert) architecture. It supports reinforcement learning training (such as GRPO) and Adapter-based efficient fine-tuning (SFT). This framework is suitable for research and practical application scenarios such as RLHF and efficient LLM adaptation.

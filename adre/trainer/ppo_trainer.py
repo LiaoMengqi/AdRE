@@ -14,8 +14,6 @@ from ..models.adre_qwen2 import AdreQwen2ForCausalLM
 from .trainer_utils.roles import MuiltRoleModel
 from .trainer_utils.temperature_scheduler import TemperatureScheduler
 from accelerate import Accelerator
-from accelerate.utils import DistributedType
-from ..utils.fspd import get_fsdp_wrapper
 
 
 class PPOTrainer:
