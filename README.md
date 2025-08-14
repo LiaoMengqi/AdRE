@@ -45,12 +45,15 @@ AdRE is a LoRA Adapter reinforcement learning (RL) framework designed for large 
 
 
 ```
-@misc{adre_2025,
+@software{adre_2025,
   author       = {Mengqi Liao},
   title        = {AdRE: Adapter Reinforcement Learning Framework},
-  howpublished = {\url{https://github.com/LiaoMengqi/AdRE}},
-  year         = {2025},
-  note         = {GitHub repository}
+  url          = {https://github.com/LiaoMengqi/AdRE},
+  version      = {1.0.0},
+  date         = {2025-07-14},
+  license      = {MIT},
+  publisher    = {GitHub},
+  howpublished = {GitHub repository}
 }
 ```
 
