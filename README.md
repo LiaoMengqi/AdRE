@@ -1,7 +1,8 @@
 # AdRE: Adapter Reinforcement Learning Framework
 
 ## News 🔥
-[2025/08/14] Urgent‼️ We found that the code is incomplete and many of them are early versions. I will complete these codes later.
+[2025/08/14] Urgent‼️ We found that the code is incomplete and many of them are early versions. We will complete these codes later.
+
 [2025/07/14] Make the repository open source！
 
 ## Introduction

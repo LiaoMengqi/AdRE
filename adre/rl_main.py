@@ -23,8 +23,9 @@ def main(args):
         config.adapter_config={
             "adapter_layers": args.adapter_layers,
             "rank": args.adapter_rank,
-            "use_multi_lora": args.use_multi_lora,
             "alpha": args.alpha,
+            "use_multi_lora": args.use_multi_lora,
+            "lora_b_eta": args.lora_b_eta,
         }
 
     if config.model_type == "llama":

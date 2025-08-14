@@ -72,6 +72,8 @@ class AdreQwen2Attention(nn.Module):
         self.scaling = self.head_dim ** -0.5
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
+
+        
         self.q_proj = AdapterLinear(config.hidden_size, config.num_attention_heads * self.head_dim, config, bias=True,
                                     use_multi_lora=False)
         self.k_proj = AdapterLinear(config.hidden_size, config.num_key_value_heads * self.head_dim, config, bias=True,
